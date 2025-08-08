@@ -9,16 +9,16 @@ if [[ -z "$PACKAGE" || -z "$DEVICE_ID" ]]; then
 fi
 
 # Colors (tetap seperti milikmu)
-RED='\033[1;31m'
-YELLOW='\033[1;33m'
-ORANGE='\033[38;5;208m'
-GREEN='\033[1;32m'
-CYAN='\033[1;36m'
-BLUE='\033[1;34m'
-DARK_BLUE='\033[38;5;25m'
-PURPLE='\033[1;35m'
-BOLD='\033[1m'
-NC='\033[0m'
+RED=$'\033[1;31m'
+YELLOW=$'\033[1;33m'
+ORANGE=$'\033[38;5;208m'
+GREEN=$'\033[1;32m'
+CYAN=$'\033[1;36m'
+BLUE=$'\033[1;34m'
+DARK_BLUE=$'\033[38;5;25m'
+PURPLE=$'\033[1;35m'
+BOLD=$'\033[1m'
+NC=$'\033[0m'
 
 # Filter file dan log file (pakai PID skrip agar gampang dipakai dari terminal lain)
 FILTER_FILE="/tmp/android_logcat_filter_$$"
@@ -224,47 +224,38 @@ while true; do
       continue
     fi
 
-    # Handle ERROR logs
-    if echo "$line" | grep -q "$PACKAGE" && echo "$line" | grep -qE "\sE\s"; then
-      timestamp=$(echo "$line" | awk '{print $1, $2}')
-      tag=$(echo "$line" | awk '{print $4}')
-      msg=$(echo "$line" | sed 's/.*E AndroidRuntime:[[:space:]]*//')
+   # Handle ERROR logs (optimized + correct colors)
+    if [[ "$line" == *"$PACKAGE_NAME"* && "$line" =~ [[:space:]]E[[:space:]] ]]; then
+        timestamp="${line:0:18}"
+        tag=$(awk '{print $4}' <<< "$line")
+        msg="${line#*E AndroidRuntime: }"
 
-      if should_display_log "$line"; then
-        error_output=""
-        if echo "$msg" | grep -qE "at[[:space:]]+.*\([^)]+\.(java|kt):[0-9]+\)"; then
-          msg=$(echo "$msg" | sed -E "s/\(([A-Za-z0-9_]+\.[a-z]+:[0-9]+)\)/$(printf "%s${CYAN}%s${NC}%s" "(" "\1" ")")/g")
-          msg=$(echo "$msg" | sed -E "s/^([[:space:]]*)at([[:space:]]+)/\1$(printf "${YELLOW}%s${NC}" "at")\2/")
-          error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      $msg"
+        if [[ "$msg" =~ at[[:space:]]+.*\([A-Za-z0-9_]+\.(java|kt):[0-9]+\) ]]; then
+            # warna file(java:lineno) dan kata "at"
+            msg=$(sed -E "s/\(([A-Za-z0-9_]+\.[a-z]+:[0-9]+)\)/${CYAN}(\\1)${NC}/g; s/^([[:space:]]*)at([[:space:]]+)/\\1${YELLOW}at${NC}\\2/" <<< "$msg")
+            echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      $msg"
 
-        elif echo "$msg" | grep -qE "^[[:space:]]*at[[:space:]]+"; then
-          msg=$(echo "$msg" | sed -E "s/^([[:space:]]*)at([[:space:]]+)/\1$(printf "${YELLOW}%s${NC}" "at")\2/")
-          error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      $msg"
+        elif [[ "$msg" =~ ^[[:space:]]*at[[:space:]]+ ]]; then
+            msg=$(sed -E "s/^([[:space:]]*)at([[:space:]]+)/\\1${YELLOW}at${NC}\\2/" <<< "$msg")
+            echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      $msg"
 
-        elif echo "$msg" | grep -qE '^[^:]+:[[:space:]]*'; then
-          if echo "$msg" | grep -q "^Caused by:"; then
-            caused_by_part="Caused by"
-            after_caused_by=$(echo "$msg" | sed 's/^Caused by:[[:space:]]*//')
-            if echo "$after_caused_by" | grep -q ":"; then
-              exception_part=$(echo "$after_caused_by" | cut -d':' -f1)
-              final_part=$(echo "$after_caused_by" | cut -d':' -f2-)
-              error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$caused_by_part${NC}: ${RED}$exception_part${NC}:${ORANGE}$final_part${NC}"
+        elif [[ "$msg" =~ ^Caused\ by: ]]; then
+            after_caused_by="${msg#Caused by: }"
+            if [[ "$after_caused_by" == *:* ]]; then
+                exception_part="${after_caused_by%%:*}"
+                final_part="${after_caused_by#*:}"
+                echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}Caused by${NC}: ${RED}$exception_part${NC}:${ORANGE}$final_part${NC}"
             else
-              error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$caused_by_part${NC}: ${RED}$after_caused_by${NC}"
+                echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}Caused by${NC}: ${RED}$after_caused_by${NC}"
             fi
-          else
-            process_part=$(echo "$msg" | cut -d':' -f1)
-            rest_part=$(echo "$msg" | cut -d':' -f2-)
-            error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$process_part${NC}:$rest_part"
-          fi
 
+        elif [[ "$msg" == *:* ]]; then
+            process_part="${msg%%:*}"
+            rest_part="${msg#*:}"
+            echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$process_part${NC}:$rest_part"
         else
-          error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
+            echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
         fi
-
-        echo -e "$error_output"
-        save_log_to_file "$error_output"
-      fi
     fi
 
     # Handle NETWORK logs from OkHttp
