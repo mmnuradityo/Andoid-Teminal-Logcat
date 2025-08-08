@@ -20,56 +20,55 @@ PURPLE='\033[1;35m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Search variables
-SEARCH_TERM=""
-SEARCH_FILE="/tmp/logcat_search_$$"
-echo "" > "$SEARCH_FILE"
+# Filter variables
+FILTER_TERM=""
+FILTER_FILE="android_logcat_$$"
+echo "" > "$FILTER_FILE"
 
-# Function to check if NETWORK log should be displayed based on search
+# Function to check if NETWORK log should be displayed based on filter
 should_display_log_network() {
   local original_line="$1"
   local formatted_output="$2"
   
-  # Check for search commands in file
-  if [[ -s "$SEARCH_FILE" ]]; then
-    local cmd=$(tail -n 1 "$SEARCH_FILE" 2>/dev/null)
+  # Check for filter commands in file
+  if [[ -s "$FILTER_FILE" ]]; then
+    local cmd=$(tail -n 1 "$FILTER_FILE" 2>/dev/null)
     if [[ "$cmd" != "$LAST_CMD" ]]; then
       LAST_CMD="$cmd"
       case "$cmd" in
-        "/search "*)
-          SEARCH_TERM="${cmd#/search }"
-          echo -e "${YELLOW}🔍 Search filter: '$SEARCH_TERM'${NC}" >&2
-          echo -e "${YELLOW}📝 Now showing only logs containing: '$SEARCH_TERM'${NC}" >&2
+        "/filter "*)
+          FILTER_TERM="${cmd#/filter }"
+          echo -e "${YELLOW}🔍 Search filter: '$FILTER_TERM'${NC}" >&2
           ;;
         "/clear")
-          SEARCH_TERM=""
+          FILTER_TERM=""
           echo -e "${GREEN}✅ Search filter cleared - showing all logs${NC}" >&2
           ;;
         "/help")
           echo -e "${BOLD}Available commands:${NC}" >&2
-          echo -e "${YELLOW}echo '/search error' >> $SEARCH_FILE${NC}" >&2
-          echo -e "${YELLOW}echo '/clear' >> $SEARCH_FILE${NC}" >&2
-          echo -e "${YELLOW}echo '/help' >> $SEARCH_FILE${NC}" >&2
+          echo -e "${YELLOW}echo '/filter query' >> $FILTER_FILE${NC}" >&2
+          echo -e "${YELLOW}echo '/clear' >> $FILTER_FILE${NC}" >&2
+          echo -e "${YELLOW}echo '/help' >> $FILTER_FILE${NC}" >&2
           ;;
       esac
     fi
   fi
   
-  # If no search term, display everything
-  if [[ -z "$SEARCH_TERM" ]]; then
+  # If no filter term, display everything
+  if [[ -z "$FILTER_TERM" ]]; then
     return 0
   fi
   
-  # Remove ANSI color codes from formatted output for clean search
+  # Remove ANSI color codes from formatted output for clean filter
   local clean_formatted=$(echo "$formatted_output" | sed 's/\x1b\[[0-9;]*m//g')
   
-  # Convert both to lowercase for case-insensitive search
+  # Convert both to lowercase for case-insensitive filter
   local original_lower=$(echo "$original_line" | tr '[:upper:]' '[:lower:]')
   local formatted_lower=$(echo "$clean_formatted" | tr '[:upper:]' '[:lower:]')
-  local search_lower=$(echo "$SEARCH_TERM" | tr '[:upper:]' '[:lower:]')
+  local filter_lower=$(echo "$FILTER_TERM" | tr '[:upper:]' '[:lower:]')
   
-  # Check if search term exists in either original line OR formatted output
-  if echo "$original_lower" | grep -q "$search_lower" || echo "$formatted_lower" | grep -q "$search_lower"; then
+  # Check if filter term exists in either original line OR formatted output
+  if echo "$original_lower" | grep -q "$filter_lower" || echo "$formatted_lower" | grep -q "$filter_lower"; then
     return 0
   else
     return 1
@@ -83,10 +82,9 @@ echo -e "${CYAN}📦 Package: $PACKAGE${NC}"
 echo -e "${CYAN}📱 Device: $DEVICE_ID${NC}"
 echo -e "${YELLOW}⏰ Started: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
 echo ""
-echo -e "${YELLOW}💡 Search Commands (run in another terminal):${NC}"
-echo -e "${YELLOW}   echo '/search error' >> $SEARCH_FILE${NC}"
-echo -e "${YELLOW}   echo '/search network' >> $SEARCH_FILE${NC}"
-echo -e "${YELLOW}   echo '/clear' >> $SEARCH_FILE${NC}"
+echo -e "${YELLOW}💡 Example filter Commands (run in another terminal):${NC}"
+echo -e "${YELLOW}   echo '/filter query' >> $FILTER_FILE${NC}"
+echo -e "${YELLOW}   echo '/clear' >> $FILTER_FILE${NC}"
 echo ""
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
@@ -109,7 +107,7 @@ echo ""
 
 # Cleanup function
 cleanup() {
-  rm -f "$SEARCH_FILE"
+  rm -f "$FILTER_FILE"
   exit 0
 }
 trap cleanup EXIT
@@ -202,7 +200,7 @@ adb -s "$DEVICE_ID" logcat --pid=$APP_PID -v threadtime | while IFS= read -r lin
     # Extract message after "okhttp.OkHttpClient: "
     msg=$(echo "$line" | sed 's/.*okhttp\.OkHttpClient:[[:space:]]*//')
  
-    # Create the formatted output first to check against search
+    # Create the formatted output first to check against filter
     formatted_output=""
     
     # Check for JSON error patterns
@@ -257,9 +255,9 @@ adb -s "$DEVICE_ID" logcat --pid=$APP_PID -v threadtime | while IFS= read -r lin
     if should_display_log_network "$line" "$formatted_output"; then
       echo -e "$formatted_output"
       
-      # Check if this is an END message and display search commands
+      # Check if this is an END message and display filter commands
       if echo "$msg" | grep -qE "^<-- END"; then
-        echo -e "--> ${CYAN}Search Commands Identifiers:${NC} ${BOLD}${YELLOW}$SEARCH_FILE${NC}"
+        echo -e "--> ${CYAN}Commands Identifiers:${NC} ${BOLD}${YELLOW}$FILTER_FILE${NC}"
       fi
     fi
     continue 
