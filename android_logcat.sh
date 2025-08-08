@@ -4,7 +4,7 @@ PACKAGE=$1
 DEVICE_ID=$2
 
 if [[ -z "$PACKAGE" || -z "$DEVICE_ID" ]]; then
-BLUE  echo "Usage: ./qa_logcat.sh <package_name> <device_serial>"
+  echo "Usage: ./qa_logcat.sh <package_name> <device_serial>"
   exit 1
 fi
 
@@ -22,8 +22,20 @@ NC='\033[0m'
 
 # Filter variables
 FILTER_TERM=""
-FILTER_FILE="android_logcat_$$"
+FILTER_FILE="/tmp/android_logcat_filter_$$"
 echo "" > "$FILTER_FILE"
+
+# Log storage variables for search functionality
+LOG_FILE="/tmp/android_logcat_$$"
+echo "" > "$LOG_FILE"
+
+# Function to save log to file (without color codes)
+save_log_to_file() {
+  local log_output="$1"
+  # Remove ALL ANSI escape sequences
+  local clean_output=$(printf '%b\n' "$log_output" | sed 's/\x1b\[[0-9;]*m//g')
+  echo "$clean_output" >> "$LOG_FILE"
+}
 
 # Function to check if NETWORK log should be displayed based on filter
 should_display_log_network() {
@@ -38,11 +50,11 @@ should_display_log_network() {
       case "$cmd" in
         "/filter "*)
           FILTER_TERM="${cmd#/filter }"
-          echo -e "${YELLOW}🔍 Search filter: '$FILTER_TERM'${NC}" >&2
+          echo -e "${YELLOW}🔍 Filter: '$FILTER_TERM'${NC}" >&2
           ;;
         "/clear")
           FILTER_TERM=""
-          echo -e "${GREEN}✅ Search filter cleared - showing all logs${NC}" >&2
+          echo -e "${GREEN}✅ Filter cleared - showing all logs${NC}" >&2
           ;;
         "/help")
           echo -e "${BOLD}Available commands:${NC}" >&2
@@ -75,16 +87,65 @@ should_display_log_network() {
   fi
 }
 
+# Function to check if ERROR/FATAL log should be displayed based on filter
+should_display_log() {
+  local log_line="$1"
+  
+  # Check for filter commands in file
+  if [[ -s "$FILTER_FILE" ]]; then
+    local cmd=$(tail -n 1 "$FILTER_FILE" 2>/dev/null)
+    if [[ "$cmd" != "$LAST_CMD" ]]; then
+      LAST_CMD="$cmd"
+      case "$cmd" in
+        "/filter "*)
+          FILTER_TERM="${cmd#/filter }"
+          echo -e "${YELLOW}🔍 Filter: '$FILTER_TERM'${NC}" >&2
+          ;;
+        "/clear")
+          FILTER_TERM=""
+          echo -e "${GREEN}✅ Filter cleared - showing all logs${NC}" >&2
+          ;;
+        "/help")
+          echo -e "${BOLD}Available commands:${NC}" >&2
+          echo -e "${YELLOW}echo '/filter query' >> $FILTER_FILE${NC}" >&2
+          echo -e "${YELLOW}echo '/clear' >> $FILTER_FILE${NC}" >&2
+          echo -e "${YELLOW}echo '/help' >> $FILTER_FILE${NC}" >&2
+          ;;
+      esac
+    fi
+  fi
+  
+  # If no filter term, display everything
+  if [[ -z "$FILTER_TERM" ]]; then
+    return 0
+  fi
+  
+  # Convert both to lowercase for case-insensitive filter
+  local log_lower=$(echo "$log_line" | tr '[:upper:]' '[:lower:]')
+  local filter_lower=$(echo "$FILTER_TERM" | tr '[:upper:]' '[:lower:]')
+  
+  if echo "$log_lower" | grep -q "$filter_lower"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 # Header
 echo ""
 echo -e "${BOLD}🔍 Android Logcat Monitor${NC}"
 echo -e "${CYAN}📦 Package: $PACKAGE${NC}"
 echo -e "${CYAN}📱 Device: $DEVICE_ID${NC}"
 echo -e "${YELLOW}⏰ Started: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
+echo -e "${CYAN}📁 Logs saved to: $LOG_FILE${NC}"
 echo ""
-echo -e "${YELLOW}💡 Example filter Commands (run in another terminal):${NC}"
+echo -e "${YELLOW}💡 Filter Commands (run in another terminal):${NC}"
 echo -e "${YELLOW}   echo '/filter query' >> $FILTER_FILE${NC}"
 echo -e "${YELLOW}   echo '/clear' >> $FILTER_FILE${NC}"
+echo ""
+echo -e "${CYAN}🔍 Search in saved logs:${NC}"
+echo -e "${CYAN}   grep -i 'your_term' $LOG_FILE${NC}"
+echo -e "${CYAN}   grep -i 'error' $LOG_FILE | tail -10${NC}"
 echo ""
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
@@ -108,6 +169,7 @@ echo ""
 # Cleanup function
 cleanup() {
   rm -f "$FILTER_FILE"
+  echo -e "${CYAN}📁 Search logs saved at: $LOG_FILE${NC}"
   exit 0
 }
 trap cleanup EXIT
@@ -124,40 +186,61 @@ adb -s "$DEVICE_ID" logcat --pid=$APP_PID -v threadtime | while IFS= read -r lin
     msg=$(echo "$line" | cut -d' ' -f7-)
 
     if should_display_log "$line"; then
-      echo -e "${RED}╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
-      echo -e "${RED}║ ${BOLD}🚨 FATAL EXCEPTION DETECTED${NC}                                                                                    ${NC}"
-      echo -e "${RED}╠════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
-      echo -e "${RED}║ ${CYAN}Time:${NC} $timestamp                                                                                               ${NC}"
-      echo -e "${RED}║ ${CYAN}Tag:${NC} $tag                                                                                                      ${NC}"
-      echo -e "${RED}╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+      fatal_header="${RED}╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+      fatal_title="${RED}║ ${BOLD}🚨 FATAL EXCEPTION DETECTED${NC}                                                                                    ${NC}"
+      fatal_separator="${RED}╠════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+      fatal_time="${RED}║ ${CYAN}Time:${NC} $timestamp                                                                                               ${NC}"
+      fatal_tag_line="${RED}║ ${CYAN}Tag:${NC} $tag                                                                                                      ${NC}"
+      fatal_footer="${RED}╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+      fatal_details="${BOLD}📋 Exception Details:${NC}"
+      fatal_msg="    ${RED}$msg${NC}"
+      
+      echo -e "$fatal_header"
+      echo -e "$fatal_title"
+      echo -e "$fatal_separator"
+      echo -e "$fatal_time"
+      echo -e "$fatal_tag_line"
+      echo -e "$fatal_footer"
       echo ""
-      echo -e "${BOLD}📋 Exception Details:${NC}"
-      echo -e "    ${RED}$msg${NC}"
+      echo -e "$fatal_details"
+      echo -e "$fatal_msg"
+      
+      # Save to file
+      save_log_to_file "$fatal_header"
+      save_log_to_file "$fatal_title"
+      save_log_to_file "$fatal_separator"
+      save_log_to_file "$fatal_time"
+      save_log_to_file "$fatal_tag_line"
+      save_log_to_file "$fatal_footer"
+      save_log_to_file ""
+      save_log_to_file "$fatal_details"
+      save_log_to_file "$fatal_msg"
     fi
     in_exception=1
     continue
   fi
 
   # Handle ERROR logs
-  if echo "$line" | grep -q "$PACKAGE_NAME" && echo "$line" | grep -qE "\sE\s"; then
+  if echo "$line" | grep -q "$PACKAGE" && echo "$line" | grep -qE "\sE\s"; then
     timestamp=$(echo "$line" | awk '{print $1, $2}')
     tag=$(echo "$line" | awk '{print $4}')
     # Remove "E AndroidRuntime: " from the message
     msg=$(echo "$line" | sed 's/.*E AndroidRuntime:[[:space:]]*//')
   
     if should_display_log "$line"; then
+      error_output=""
       # Check for "Process:" pattern and make it red
       if echo "$msg" | grep -qE "at[[:space:]]+.*\([^)]+\.(java|kt):[0-9]+\)"; then
         # First, color the file reference (java/kt files) with cyan
         msg=$(echo "$msg" | sed -E "s/\(([A-Za-z0-9_]+\.[a-z]+:[0-9]+)\)/$(printf "%s${CYAN}%s${NC}%s" "(" "\1" ")")/g")
         # Then, color the "at" keyword with yellow
         msg=$(echo "$msg" | sed -E "s/^([[:space:]]*)at([[:space:]]+)/\1$(printf "${YELLOW}%s${NC}" "at")\2/")
-        echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      $msg"
+        error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      $msg"
 
       elif echo "$msg" | grep -qE "^[[:space:]]*at[[:space:]]+"; then
         # Handle any other "at" lines that don't match the previous pattern
         msg=$(echo "$msg" | sed -E "s/^([[:space:]]*)at([[:space:]]+)/\1$(printf "${YELLOW}%s${NC}" "at")\2/")
-        echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      $msg"
+        error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      $msg"
 
       elif echo "$msg" | grep -qE '^[^:]+:[[:space:]]*'; then
        # Special handling for "Caused by:" pattern
@@ -173,23 +256,26 @@ adb -s "$DEVICE_ID" logcat --pid=$APP_PID -v threadtime | while IFS= read -r lin
            # Split at the next colon
            exception_part=$(echo "$after_caused_by" | cut -d':' -f1)
            final_part=$(echo "$after_caused_by" | cut -d':' -f2-)
-           echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$caused_by_part${NC}: ${RED}$exception_part${NC}:${ORANGE}$final_part${NC}"
+           error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$caused_by_part${NC}: ${RED}$exception_part${NC}:${ORANGE}$final_part${NC}"
       
         else
           # No additional colon, just color the exception part red
-          echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$caused_by_part${NC}: ${RED}$after_caused_by${NC}"
+          error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$caused_by_part${NC}: ${RED}$after_caused_by${NC}"
         fi
 
     else
       # Default handling for other patterns with colons
       process_part=$(echo "$msg" | cut -d':' -f1)
       rest_part=$(echo "$msg" | cut -d':' -f2-)
-      echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$process_part${NC}:$rest_part"
+      error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$process_part${NC}:$rest_part"
     fi
 
       else
-        echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
+        error_output="${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
       fi
+      
+      echo -e "$error_output"
+      save_log_to_file "$error_output"
     fi
   fi
   
@@ -254,10 +340,14 @@ adb -s "$DEVICE_ID" logcat --pid=$APP_PID -v threadtime | while IFS= read -r lin
     # Now check if should display - check both original line AND formatted output
     if should_display_log_network "$line" "$formatted_output"; then
       echo -e "$formatted_output"
+      save_log_to_file "$formatted_output"
       
       # Check if this is an END message and display filter commands
       if echo "$msg" | grep -qE "^<-- END"; then
-        echo -e "--> ${CYAN}Commands Identifiers:${NC} ${BOLD}${YELLOW}$FILTER_FILE${NC}"
+        end_commands="--> ${CYAN}Commands Identifiers:${NC} ${BOLD}${YELLOW}$FILTER_FILE${NC}"
+        echo -e "$end_commands"
+        save_log_to_file "$end_commands"
+        save_log_to_file "$LOG_FILE"
       fi
     fi
     continue 
