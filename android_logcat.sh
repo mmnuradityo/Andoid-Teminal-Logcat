@@ -42,14 +42,6 @@ get_mtime() {
 
 FILTER_MTIME=$(get_mtime "$FILTER_FILE" 2>/dev/null || echo 0)
 
-# Save clean logs tanpa kode warna
-save_log_to_file() {
-  local log_output="$1"
-  local clean_output
-  clean_output=$(printf '%b\n' "$log_output" | sed 's/\x1b\[[0-9;]*m//g')
-  echo "$clean_output" >> "$LOG_FILE"
-}
-
 # Update FILTER_TERM hanya kalau file filter berubah (efisien)
 update_filter_if_changed() {
   local cur
@@ -84,7 +76,64 @@ update_filter_if_changed() {
   fi
 }
 
-# Case-insensitive substring match without bash-4 ${,,}
+# Handle FATAL EXCEPTION
+show_display_fatal_header() {
+  line="$1"
+  if [[ "$line" == *"FATAL EXCEPTION"* ]]; then
+    read -r timestamp_date timestamp_time pid tid level tag _ msg <<< "$line"
+    local timestamp="$timestamp_date $timestamp_time"
+    local fatal_header="${RED}╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+    local fatal_title="${RED}║ ${BOLD}🚨 FATAL EXCEPTION DETECTED${NC}                                                                                    ${NC}"
+    local fatal_separator="${RED}╠════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+    local fatal_time="${RED}║ ${CYAN}Time:${NC} $timestamp                                                                                               ${NC}"
+    local fatal_tag_line="${RED}║ ${CYAN}Tag:${NC} $tag                                                                                                      ${NC}"
+    local fatal_footer="${RED}╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+    local fatal_details="${BOLD}📋 Exception Details:${NC}"
+    local fatal_msg="    ${RED}${line#*FATAL EXCEPTION:*}${NC}"
+
+    printf '%s\n' "$fatal_header" "$fatal_title" "$fatal_separator" "$fatal_time" "$fatal_tag_line" "$fatal_footer" "" "$fatal_details" "$fatal_msg"
+    in_exception=1
+    return 0
+  fi
+
+  return 1
+}
+
+# Handle ERROR logs
+show_error() {
+  line="$1"
+  if [[ "$line" == *"$PACKAGE_NAME"* && "$line" =~ [[:space:]]E[[:space:]] ]]; then
+    timestamp="${line:0:18}"
+    read -r _ _ _ tag msg <<< "$line"
+
+    if [[ "$msg" =~ at[[:space:]]+.*\([A-Za-z0-9_]+\.(java|kt):[0-9]+\) ]]; then
+      msg=$(sed -E "
+          s/(E [^ ]*:)/${RED}\1${NC}/
+          s/\(([A-Za-z0-9_]+\.[a-z]+:[0-9]+)\)/${CYAN}(\1)${NC}/g
+          s/^([[:space:]]*)at([[:space:]]+)/\1${YELLOW}at${NC}\2/
+      " <<< "$msg")
+      echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
+
+    elif [[ "$msg" =~ E[[:space:]]+[^:]+:[[:space:]]+at[[:space:]]+ ]]; then
+      msg=$(sed -E "s/(E [^ ]*:)(.*)/${RED}\1${NC}\2/" <<< "$msg")
+      echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
+
+    elif [[ "$msg" =~ E[[:space:]]+[^:]+:[[:space:]]+[^:]+: ]]; then
+      msg=$(sed -E "s/(E [^ ]*:)([^:]*:)(.*)/${RED}\1${NC}${YELLOW}\2${NC}\3/" <<< "$msg")
+      echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
+
+    else
+      msg=$(sed -E "s/(E [^ ]*:)/${RED}\1${NC}/" <<< "$msg")
+      echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
+    fi
+
+    return 0
+  fi
+
+  return 1
+}
+
+# # Case-insensitive substring match without bash-4 ${,,}
 ci_contains() {
   local hay="$1"
   local ned="$2"
@@ -97,17 +146,31 @@ ci_contains() {
     return 1
   fi
 }
+shopt -s nocasematch
 
-# Two helpers used later for filtering
-should_display_log() {
-  [[ -z "$FILTER_TERM" ]] && return 0
-  ci_contains "$1" "$FILTER_TERM"
+# Case-insensitive substring match tanpa tr
+ci_contains() {
+  local hay="$1" ned="$2"
+  [[ -z "$ned" ]] && return 0
+  [[ "$hay" == *"$ned"* ]]
+}
+
+strip_ansi() {
+  local str="$1"
+  str="${str//$'\x1b'[\[*([0-9;])m/}"
+  printf '%s' "$str"
 }
 
 should_display_log_network() {
   [[ -z "$FILTER_TERM" ]] && return 0
   local clean_formatted
-  clean_formatted=$(printf '%b' "$2" | sed 's/\x1b\[[0-9;]*m//g')
+  clean_formatted=$(strip_ansi "$2")
+  ci_contains "$1" "$FILTER_TERM" || ci_contains "$clean_formatted" "$FILTER_TERM"
+}
+should_display_log_network() {
+  [[ -z "$FILTER_TERM" ]] && return 0
+  local clean_formatted="$2"
+  clean_formatted="${clean_formatted//$'\x1b'[\[*([0-9;])m/}"
   if ci_contains "$1" "$FILTER_TERM" || ci_contains "$clean_formatted" "$FILTER_TERM"; then
     return 0
   else
@@ -115,12 +178,122 @@ should_display_log_network() {
   fi
 }
 
-shoud_print_identifier() {
-  local msg="$1"
-  if [[ "$msg" == "<-- END"* ]]; then
-      end_commands="--> ${CYAN}Commands Identifiers:${NC} ${BOLD}${YELLOW}$CMD_IDENTIFIER${NC}"
-      echo -e "$end_commands"
+# Handle NETWORK logs from OkHttp
+tag_status=""
+
+set_tag_status() { 
+    local tag="$1"
+    local status="$2"
+    tag_status="${tag_status//${tag}:*;/}"
+    tag_status="${tag_status}${tag}:${status};" 
+}
+
+get_tag_status() {
+    local tag="$1"
+    local temp="${tag_status#*${tag}:}"
+    [[ "$temp" != "$tag_status" ]] && echo "${temp%%;*}"
+}
+
+show_network_log() {
+  line="$1"
+  [[ "$line" != *"okhttp.OkHttpClient"* ]] && return 1
+
+  read -r date time pid tid level tag rest <<< "$line"
+  timestamp="$date $time"
+  msg="${line#*okhttp.OkHttpClient:}"
+  msg="${msg#"${msg%%[![:space:]]*}"}" 
+  network_prefix="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tid]${NC}"
+  
+  case "$msg" in
+    '{"error'*|'{"errors'*)
+      formatted_output="$network_prefix  ${RED}--> [ERROR] ${NC}${ORANGE}Result${NC}: ${RED}$msg${NC}"
+      ;;
+    
+    '{'*'}')
+      formatted_output="$network_prefix  ${GREEN}--> [SUCCESS] ${NC}${ORANGE}Result${NC}: ${GREEN}$msg${NC}"
+      ;;
+    
+    '{'*)
+      formatted_output="$network_prefix  ${GREEN}--> [SUCCESS] ${NC}${ORANGE}Result${NC}: ${GREEN}$msg${NC}"
+      ;;
+    
+    '-->'*)
+      case "$msg" in
+        *'GET'*|*'POST'*|*'PUT'*|*'DELETE'*)
+          set_tag_status "$tag" "REQUEST"
+          ;;
+      esac
+      formatted_output="$network_prefix  ${YELLOW}$msg${NC}"
+      ;;
+    
+    '<--'*)
+      case "$msg" in
+        *'<-- 4'*|*'<-- 5'*)
+          modified_msg="${msg/<-- /<-- [ERROR] }"
+          formatted_output="$network_prefix  ${RED}$modified_msg${NC}"
+          set_tag_status "$tag" "ERROR"
+          ;;
+        *'<-- 2'*|*'<-- 3'*)
+          modified_msg="${msg/<-- /<-- [SUCCESS] }"
+          formatted_output="$network_prefix  ${GREEN}$modified_msg${NC}"
+          set_tag_status "$tag" "SUCCESS"
+          ;;
+        *)
+          formatted_output="$network_prefix  ${YELLOW}$msg${NC}"
+          ;;
+      esac
+      ;;
+    
+    *':'*)
+      case "$msg" in
+        'nel: {'*|'report-to: {'*)
+          return 1
+          ;;
+        *)
+          key="${msg%%:*}"
+          value="${msg#*:}"
+          
+          status=$(get_tag_status "$tag")
+          case "$status" in
+            "ERROR")
+              formatted_output="$network_prefix      ${RED}[ERROR]${NC} ${YELLOW}$key${NC}:$value"
+              ;;
+            "SUCCESS")
+              formatted_output="$network_prefix      ${GREEN}[SUCCESS]${NC} ${YELLOW}$key${NC}:$value"
+              ;;
+            *)
+              formatted_output="$network_prefix      ${YELLOW}$key${NC}:$value"
+              ;;
+          esac
+          ;;
+      esac
+      ;;
+    
+    *'"'*)
+      case "$msg" in
+        'nel:'*|'report-to:'*)
+          return 1
+          ;;
+        *)
+          formatted_output="$network_prefix  ${GREEN}$msg${NC}"
+          ;;
+      esac
+      ;;
+    
+    *)
+      formatted_output="$network_prefix  $msg"
+      ;;
+  esac
+  
+  if should_display_log_network "$line" "$formatted_output"; then
+    echo -e "$formatted_output"
+    clean_output="${formatted_output//$'\x1b'[\[*([0-9;])m/}"
+    echo "$clean_output" >> "$LOG_FILE"
+    
+    [[ "$msg" == "<-- END"* ]] && echo -e "--> ${CYAN}Commands Identifiers:${NC} ${BOLD}${YELLOW}$CMD_IDENTIFIER${NC}"
   fi
+  
+  return 0
 }
 
 # Cleanup
@@ -175,18 +348,6 @@ line_counter=0
 LAST_CMD=""    # already set above
 in_exception=0
 
-
-tag_status=""
-set_tag_status() {
-    local tag="$1"
-    local status="$2"
-    tag_status="${tag_status}${tag}:${status};"
-}
-get_tag_status() {
-    local tag="$1"
-    echo "$tag_status" | grep -o "${tag}:[^;]*" | cut -d':' -f2
-}
-
 # Main reconnect loop
 while true; do
   adb -s "$DEVICE_ID" logcat --pid=$APP_PID -v threadtime 2>/dev/null | while IFS= read -r line; do
@@ -195,139 +356,9 @@ while true; do
       update_filter_if_changed
     fi
 
-    # Handle FATAL EXCEPTION
-    if [[ "$line" == *"FATAL EXCEPTION"* ]]; then
-      timestamp=$(echo "$line" | awk '{print $1, $2}')
-      tag=$(echo "$line" | awk '{print $4}')
-      msg=$(echo "$line" | cut -d' ' -f7-)
-
-      if should_display_log "$line"; then
-        fatal_header="${RED}╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
-        fatal_title="${RED}║ ${BOLD}🚨 FATAL EXCEPTION DETECTED${NC}                                                                                    ${NC}"
-        fatal_separator="${RED}╠════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
-        fatal_time="${RED}║ ${CYAN}Time:${NC} $timestamp                                                                                               ${NC}"
-        fatal_tag_line="${RED}║ ${CYAN}Tag:${NC} $tag                                                                                                      ${NC}"
-        fatal_footer="${RED}╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════${NC}"
-        fatal_details="${BOLD}📋 Exception Details:${NC}"
-        fatal_msg="    ${RED}$msg${NC}"
-
-        echo -e "$fatal_header"
-        echo -e "$fatal_title"
-        echo -e "$fatal_separator"
-        echo -e "$fatal_time"
-        echo -e "$fatal_tag_line"
-        echo -e "$fatal_footer"
-        echo ""
-        echo -e "$fatal_details"
-        echo -e "$fatal_msg"
-
-        # Save to file (clean)
-        save_log_to_file "$fatal_header"
-        save_log_to_file "$fatal_title"
-        save_log_to_file "$fatal_separator"
-        save_log_to_file "$fatal_time"
-        save_log_to_file "$fatal_tag_line"
-        save_log_to_file "$fatal_footer"
-        save_log_to_file ""
-        save_log_to_file "$fatal_details"
-        save_log_to_file "$fatal_msg"
-      fi
-      in_exception=1
-      continue
-    fi
-
-    # Handle ERROR logs (optimized + correct colors)
-    if [[ "$line" == *"$PACKAGE_NAME"* && "$line" =~ [[:space:]]E[[:space:]] ]]; then
-        timestamp="${line:0:18}"
-        tag=$(awk '{print $4}' <<< "$line")
-        msg=$(sed -E 's/^[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} +[0-9]+ +[0-9]+ //' <<< "$line")
-        
-        if [[ "$msg" =~ at[[:space:]]+.*\([A-Za-z0-9_]+\.(java|kt):[0-9]+\) ]]; then
-            msg=$(sed -E "s/(E [^ ]*:)/${RED}\1${NC}/" <<< "$msg")
-            msg=$(sed -E "s/\(([A-Za-z0-9_]+\.[a-z]+:[0-9]+)\)/${CYAN}(\1)${NC}/g; s/^([[:space:]]*)at([[:space:]]+)/\1${YELLOW}at${NC}\2/" <<< "$msg")
-            echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
-
-        elif [[ "$msg" =~ E[[:space:]]+[^:]+:[[:space:]]+at[[:space:]]+ ]]; then
-          msg=$(sed -E "s/(E [^ ]*:)(.*)/${RED}\1${NC}\2/" <<< "$msg")
-          echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
-
-        elif [[ "$msg" =~ E[[:space:]]+[^:]+:[[:space:]]+[^:]+: ]]; then
-            msg=$(sed -E "s/(E [^ ]*:)([^:]*:)(.*)/${RED}\1${NC}${YELLOW}\2${NC}\3/" <<< "$msg")
-            echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
-
-        else
-            msg=$(sed -E "s/(E [^ ]*:)/${RED}\1${NC}/" <<< "$msg")
-            echo -e "${RED}[ERROR]${NC}   ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
-        fi
-    fi
-
-    # Handle NETWORK logs from OkHttp
-    if [[ "$line" == *"okhttp.OkHttpClient"* ]]; then
-      timestamp=$(echo "$line" | awk '{print $1, $2}')
-      tag=$(echo "$line" | awk '{print $4}')
-      msg=$(echo "$line" | sed 's/.*okhttp\.OkHttpClient:[[:space:]]*//')
-
-      formatted_output=""
-
-      if [[ "$msg" =~ ^\{\"(errors?)\": ]]; then
-          formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${RED}--> [ERROR] ${NC}${ORANGE}Result${NC}: ${RED}$msg${NC}"
-
-      elif [[ "$msg" =~ ^\{.*\}[[:space:]]*$ ]]; then
-          formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${GREEN}--> [SUCCESS] ${NC}${ORANGE}Result${NC}: ${GREEN}$msg${NC}"
-
-      elif [[ "$msg" =~ ^\{ ]]; then
-          formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${GREEN}--> [SUCCESS] ${NC}${ORANGE}Result${NC}: ${GREEN}$msg${NC}"
-
-      elif [[ "$msg" == *'"'* && "$msg" == *":"* && ! "$msg" =~ ^(nel|report-to):[[:space:]]*\{ ]]; then
-          formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${GREEN}$msg${NC}"
-
-      elif [[ "$msg" =~ ^[0-9a-zA-Z] && "$msg" == *'"'* && ! "$msg" =~ ^(nel|report-to):[[:space:]]*\{ ]]; then
-          formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${GREEN}$msg${NC}"
-
-      elif [[ "$msg" == "-->"* ]]; then
-          if [[ "$msg" == *"GET"* || "$msg" == *"POST"* || "$msg" == *"PUT"* || "$msg" == *"DELETE"* ]]; then
-              tag_status[$tag]="REQUEST"
-          fi
-          formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$msg${NC}"
-
-      elif [[ "$msg" == "<--"* ]]; then
-          if [[ "$msg" == *"<-- 4"* || "$msg" == *"<-- 5"* ]]; then
-              modified_msg=$(echo "$msg" | sed 's/<-- \([45][0-9][0-9]\)/<-- [ERROR] \1/')
-              formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${RED}$modified_msg${NC}"
-              tag_status[$tag]="ERROR"
-
-          elif [[ "$msg" == *"<-- 2"* || "$msg" == *"<-- 3"* ]]; then
-              modified_msg=$(echo "$msg" | sed 's/<-- \([23][0-9][0-9]\)/<-- [SUCCESS] \1/')
-              formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${GREEN}$modified_msg${NC}"
-              tag_status[$tag]="SUCCESS"
-
-          else
-              formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  ${YELLOW}$msg${NC}"
-          fi
-
-      elif [[ "$msg" =~ ^[^:]+:[[:space:]]* ]]; then
-          key=$(echo "$msg" | cut -d':' -f1)
-          value=$(echo "$msg" | cut -d':' -f2-)
-          
-          if [[ "${tag_status[$tag]}" == "ERROR" ]]; then
-              formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      ${RED}[ERROR]${NC} ${YELLOW}$key${NC}:$value"
-          elif [[ "${tag_status[$tag]}" == "SUCCESS" ]]; then
-              formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      ${GREEN}[SUCCESS]${NC} ${YELLOW}$key${NC}:$value"
-          else
-              formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}      ${YELLOW}$key${NC}:$value"
-          fi
-
-      else
-          formatted_output="${YELLOW}[NETWORK]${NC} ${BLUE}$timestamp${NC} ${PURPLE}[$tag]${NC}  $msg"
-      fi
-
-      if should_display_log_network "$line" "$formatted_output"; then
-          echo -e "$formatted_output"
-          save_log_to_file "$formatted_output"
-          shoud_print_identifier "$msg"
-      fi
-      continue
-    fi
+    show_display_fatal_header "$line" && continue
+    show_error "$line" && continue
+    show_network_log "$line"
 
   done
 
