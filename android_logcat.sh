@@ -194,6 +194,25 @@ get_tag_status() {
     [[ "$temp" != "$tag_status" ]] && echo "${temp%%;*}"
 }
 
+
+excape_json_like() {
+  local msg="$1"
+  local key="${msg%%:*}"
+  local value="${msg#*:}"
+  status=$(get_tag_status "$tag")
+    case "$status" in
+      "ERROR")
+        formatted_output="$network_prefix      ${RED}[ERROR]${NC} ${YELLOW}$key${NC}:$value"
+      ;;
+      
+      "SUCCESS")
+         formatted_output="$network_prefix      ${GREEN}[SUCCESS]${NC} ${YELLOW}$key${NC}:$value"
+      ;;
+    *)
+      formatted_output="$network_prefix      ${YELLOW}$key${NC}:$value"
+    ;;
+    esac
+}
 show_network_log() {
   line="$1"
   [[ "$line" != *"okhttp.OkHttpClient"* ]] && return 1
@@ -213,8 +232,22 @@ show_network_log() {
       formatted_output="$network_prefix  ${GREEN}--> [SUCCESS] ${NC}${ORANGE}Result${NC}: ${GREEN}$msg${NC}"
       ;;
     
-    '{'*)
-      formatted_output="$network_prefix  ${GREEN}--> [SUCCESS] ${NC}${ORANGE}Result${NC}: ${GREEN}$msg${NC}"
+     (\{* | *\} | *\}*)
+      case "$msg" in
+          'nel: {'*|'report-to: {'*)
+              case "$msg" in
+                  *':'*)
+                      excape_json_like "$msg"
+                      ;;
+              esac
+              ;;
+            '{'*)
+              formatted_output="$network_prefix  ${GREEN}--> [SUCCESS] ${NC}${ORANGE}Result${NC}: ${GREEN}$msg${NC}"
+              ;;
+            *)
+              formatted_output="$network_prefix  ${GREEN}[SUCCESS]${NC} ${GREEN}$msg${NC}"
+              ;;
+      esac
       ;;
     
     '-->'*)
@@ -250,21 +283,7 @@ show_network_log() {
           return 1
           ;;
         *)
-          key="${msg%%:*}"
-          value="${msg#*:}"
-          
-          status=$(get_tag_status "$tag")
-          case "$status" in
-            "ERROR")
-              formatted_output="$network_prefix      ${RED}[ERROR]${NC} ${YELLOW}$key${NC}:$value"
-              ;;
-            "SUCCESS")
-              formatted_output="$network_prefix      ${GREEN}[SUCCESS]${NC} ${YELLOW}$key${NC}:$value"
-              ;;
-            *)
-              formatted_output="$network_prefix      ${YELLOW}$key${NC}:$value"
-              ;;
-          esac
+          excape_json_like "$msg"
           ;;
       esac
       ;;
