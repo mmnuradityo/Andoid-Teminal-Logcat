@@ -1,14 +1,75 @@
 #!/bin/bash
 
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATA_DIR="$SCRIPT_DIR/data_logs"
+
+# Handle new commands
+if [[ "$2" == "--filter" && -n "$3" ]]; then
+  FILTER_FILE="$DATA_DIR/android_logcat_filter_$1.txt"
+  
+  if [[ ! -f "$FILTER_FILE" ]]; then
+    echo "Error: Session $1 not found"
+    exit 1
+  fi
+
+  if [[ "$3" == "clear" ]]; then
+    echo "/clear" >> "$FILTER_FILE"
+    echo "Filter cleared for session $1"
+    exit 0
+  fi
+
+  echo "/filter $3" >> "$FILTER_FILE"
+  echo "Filter '$3' applied to session $1"
+  exit 0
+fi
+
+if [[ "$2" == "--search" && -n "$3" ]]; then
+  LOG_FILE="$DATA_DIR/android_logcat_$1.txt"
+  
+  if [[ ! -f "$LOG_FILE" ]]; then
+    echo "Error: Log file for session $1 not found"
+    exit 1
+  fi
+  
+  grep -i "$3" "$LOG_FILE"
+  exit 0
+fi
+
+if [[ "$1" == "--help" ]]; then
+  CMD_IDENTIFIER=""
+  for file in "$DATA_DIR"/android_logcat_*.txt; do
+    [[ ! -f "$file" ]] && continue
+    
+    basename_file=$(basename "$file")
+    name="${basename_file#android_logcat_}"
+    name="${name%.txt}"
+    echo "🆔 Commands Identifiers: $name"
+    CMD_IDENTIFIER=$name
+    break
+  done
+  
+  if [[ -z "$CMD_IDENTIFIER" ]]; then
+    echo "No active sessions found"
+    exit 1
+  fi
+  
+  echo -e "${BOLD}Available commands:${NC}" >&2
+  echo -e "  - Filter logs: ${YELLOW}android_logcat $CMD_IDENTIFIER --filter <term>${NC}" >&2
+  echo -e "  - Clear filter: ${YELLOW}android_logcat $CMD_IDENTIFIER --filter clear${NC}" >&2
+  echo -e "  - Search logs: ${YELLOW}android_logcat $CMD_IDENTIFIER --search <term>${NC}" >&2
+  exit 0
+fi
+
 PACKAGE=$1
 DEVICE_ID=$2
 
 if [[ -z "$PACKAGE" || -z "$DEVICE_ID" ]]; then
-  echo "Usage: ./qa_logcat.sh <package_name> <device_serial>"
+  echo "Usage: ./android_logcat.sh <package_name> <device_serial>"
   exit 1
 fi
 
-# Colors (tetap seperti milikmu)
+# Colors
 RED=$'\033[1;31m'
 YELLOW=$'\033[1;33m'
 ORANGE=$'\033[38;5;208m'
@@ -22,14 +83,19 @@ NC=$'\033[0m'
 
 # Filter file dan log file (pakai PID skrip agar gampang dipakai dari terminal lain)
 CMD_IDENTIFIER=$$
-FILTER_FILE="/tmp/android_logcat_filter_$CMD_IDENTIFIER"
-LOG_FILE="/tmp/android_logcat_$CMD_IDENTIFIER"
+
+mkdir -p "$DATA_DIR"
+rm -f "$DATA_DIR"/android_logcat_*
+
+FILTER_FILE="$DATA_DIR/android_logcat_filter_${CMD_IDENTIFIER}.txt"
+LOG_FILE="$DATA_DIR/android_logcat_${CMD_IDENTIFIER}.txt"
+
 FILTER_TERM=""
 LAST_CMD=""
 : > "$FILTER_FILE"
 : > "$LOG_FILE"
 
-# Helper: ambil mtime cross-platform (macOS stat -f %m, linux stat -c %Y)
+# Helper: get mtime cross-platform (macOS stat -f %m, linux stat -c %Y)
 get_mtime() {
   if stat -f %m "$1" >/dev/null 2>&1; then
     stat -f %m "$1" 2>/dev/null
@@ -42,7 +108,7 @@ get_mtime() {
 
 FILTER_MTIME=$(get_mtime "$FILTER_FILE" 2>/dev/null || echo 0)
 
-# Update FILTER_TERM hanya kalau file filter berubah (efisien)
+# Update the FILTER_TERM only when file filter change
 update_filter_if_changed() {
   local cur
   cur=$(get_mtime "$FILTER_FILE" 2>/dev/null || echo 0)
@@ -61,12 +127,6 @@ update_filter_if_changed() {
         "/clear")
           FILTER_TERM=""
           echo -e "${GREEN}✅ Filter cleared - showing all logs${NC}" >&2
-          ;;
-        "/help")
-          echo -e "${BOLD}Available commands:${NC}" >&2
-          echo -e "${YELLOW}echo '/filter something' >> $FILTER_FILE${NC}" >&2
-          echo -e "${YELLOW}echo '/clear' >> $FILTER_FILE${NC}" >&2
-          echo -e "${YELLOW}echo '/help' >> $FILTER_FILE${NC}" >&2
           ;;
         *)
           # ignore other lines
@@ -133,7 +193,7 @@ show_error() {
   return 1
 }
 
-# # Case-insensitive substring match without bash-4 ${,,}
+# Case-insensitive substring match without bash-4 ${,,}
 ci_contains() {
   local hay="$1"
   local ned="$2"
@@ -182,37 +242,44 @@ should_display_log_network() {
 tag_status=""
 
 set_tag_status() { 
-    local tag="$1"
+    local tid="$1"
     local status="$2"
-    tag_status="${tag_status//${tag}:*;/}"
-    tag_status="${tag_status}${tag}:${status};" 
+    tag_status="${tag_status//${tid}:*;/}"
+    tag_status="${tag_status}${tid}:${status};" 
 }
 
 get_tag_status() {
-    local tag="$1"
-    local temp="${tag_status#*${tag}:}"
+    local tid="$1"
+    local temp="${tag_status#*${tid}:}"
     [[ "$temp" != "$tag_status" ]] && echo "${temp%%;*}"
 }
 
+remove_tag_status() {
+    local tid="$1"
+    tag_status="${tag_status//${tid}:*;/}"
+}
 
 excape_json_like() {
-  local msg="$1"
+  local network_prefix="$1"
+  local msg="$2"
+  local tid="$3"
   local key="${msg%%:*}"
   local value="${msg#*:}"
-  status=$(get_tag_status "$tag")
+  status=$(get_tag_status "$tid")
     case "$status" in
       "ERROR")
         formatted_output="$network_prefix      ${RED}[ERROR]${NC} ${YELLOW}$key${NC}:$value"
       ;;
       
       "SUCCESS")
-         formatted_output="$network_prefix      ${GREEN}[SUCCESS]${NC} ${YELLOW}$key${NC}:$value"
+        formatted_output="$network_prefix      ${GREEN}[SUCCESS]${NC} ${YELLOW}$key${NC}:$value"
       ;;
-    *)
-      formatted_output="$network_prefix      ${YELLOW}$key${NC}:$value"
-    ;;
+      *)
+        formatted_output="$network_prefix      ${YELLOW}$key${NC}:$value"
+      ;;
     esac
 }
+
 show_network_log() {
   line="$1"
   [[ "$line" != *"okhttp.OkHttpClient"* ]] && return 1
@@ -229,7 +296,12 @@ show_network_log() {
       ;;
     
     '{'*'}')
-      formatted_output="$network_prefix  ${GREEN}--> [SUCCESS] ${NC}${ORANGE}Result${NC}: ${GREEN}$msg${NC}"
+      status=$(get_tag_status "$tid")
+      if [ "$status" == "SUCCESS" ]; then
+        formatted_output="$network_prefix  ${GREEN}--> [SUCCESS] ${NC}${ORANGE}Result${NC}: ${GREEN}$msg${NC}"
+      else
+        formatted_output="$network_prefix      ${ORANGE}Request${NC}: $msg"
+      fi
       ;;
     
      (\{* | *\} | *\}*)
@@ -237,7 +309,7 @@ show_network_log() {
           'nel: {'*|'report-to: {'*)
               case "$msg" in
                   *':'*)
-                      excape_json_like "$msg"
+                      excape_json_like "$network_prefix" "$msg" "$tid"
                       ;;
               esac
               ;;
@@ -251,11 +323,6 @@ show_network_log() {
       ;;
     
     '-->'*)
-      case "$msg" in
-        *'GET'*|*'POST'*|*'PUT'*|*'DELETE'*)
-          set_tag_status "$tag" "REQUEST"
-          ;;
-      esac
       formatted_output="$network_prefix  ${YELLOW}$msg${NC}"
       ;;
     
@@ -264,15 +331,30 @@ show_network_log() {
         *'<-- 4'*|*'<-- 5'*)
           modified_msg="${msg/<-- /<-- [ERROR] }"
           formatted_output="$network_prefix  ${RED}$modified_msg${NC}"
-          set_tag_status "$tag" "ERROR"
+          set_tag_status "$tid" "ERROR"
           ;;
         *'<-- 2'*|*'<-- 3'*)
           modified_msg="${msg/<-- /<-- [SUCCESS] }"
           formatted_output="$network_prefix  ${GREEN}$modified_msg${NC}"
-          set_tag_status "$tag" "SUCCESS"
+          set_tag_status "$tid" "SUCCESS"
           ;;
         *)
-          formatted_output="$network_prefix  ${YELLOW}$msg${NC}"
+          if [[ "$network_prefix" == *"[$tid]"* && "$msg" == *"<-- END HTTP"* ]]; then
+            status=$(get_tag_status "$tid")
+            endHttp=${msg#*<-- }
+            
+            if [ "$status" == "ERROR" ]; then
+              formatted_output="$network_prefix  ${RED}<-- [ERROR] $endHttp${NC}"
+            elif [ "$status" == "SUCCESS" ]; then
+              formatted_output="$network_prefix  ${GREEN}<-- [SUCCESS] $endHttp${NC}"
+            else
+              formatted_output="$network_prefix  ${YELLOW}<-- $endHttp${NC}"
+            fi
+            remove_tag_status "$tid"
+
+          else 
+            formatted_output="$network_prefix  ${YELLOW}$msg${NC}"
+          fi
           ;;
       esac
       ;;
@@ -283,7 +365,7 @@ show_network_log() {
           return 1
           ;;
         *)
-          excape_json_like "$msg"
+          excape_json_like "$network_prefix" "$msg" "$tid"
           ;;
       esac
       ;;
@@ -309,7 +391,7 @@ show_network_log() {
     clean_output="${formatted_output//$'\x1b'[\[*([0-9;])m/}"
     echo "$clean_output" >> "$LOG_FILE"
     
-    [[ "$msg" == "<-- END"* ]] && echo -e "--> ${CYAN}Commands Identifiers:${NC} ${BOLD}${YELLOW}$CMD_IDENTIFIER${NC}"
+    [[ "$msg" == "<-- END"* ]] && echo -e "${CYAN}[CMD_ID]${NC}  --> ${CYAN}🆔 Commands Identifiers:${NC} ${BOLD}${YELLOW}$CMD_IDENTIFIER${NC}"
   fi
   
   return 0
@@ -325,21 +407,14 @@ trap cleanup EXIT
 
 # Header
 echo ""
-echo -e "${BOLD}🔍 Android Logcat Monitor${NC}"
-echo -e "${CYAN}📦 Package: $PACKAGE${NC}"
-echo -e "${CYAN}📱 Device: $DEVICE_ID${NC}"
-echo -e "${YELLOW}⏰ Started: $(date '+%Y-%m-%d %H:%M:%S')${NC}"
-echo -e "${CYAN}📁 Logs saved to: $LOG_FILE${NC}"
-echo -e "${CYAN}📄 Filter file (use this path): $FILTER_FILE${NC}"
-echo ""
-echo -e "${YELLOW}💡 Filter Commands (run in another terminal):${NC}"
-echo -e "${YELLOW}   echo '/filter error' >> $FILTER_FILE${NC}"
-echo -e "${YELLOW}   echo '/clear' >> $FILTER_FILE${NC}"
-echo -e "${YELLOW}   echo '/help' >> $FILTER_FILE${NC}"
-echo ""
-echo -e "${CYAN}🔍 Search in saved logs:${NC}"
-echo -e "${CYAN}   grep -i 'your_term' $LOG_FILE${NC}"
-echo -e "${CYAN}   grep -i 'error' $LOG_FILE | tail -10${NC}"
+echo -e "${BOLD}${CYAN}🔍 Android Logcat Monitor${NC}"
+echo -e "${CYAN}📦 Package:${NC} ${BOLD}${YELLOW}$PACKAGE${NC}"
+echo -e "${CYAN}📱 Device:${NC} ${BOLD}${YELLOW}$DEVICE_ID${NC}"
+echo -e "${CYAN}⏰ Started:${NC} ${BOLD}${YELLOW}$(date '+%Y-%m-%d %H:%M:%S')${NC}"
+echo -e "${CYAN}🆔 Commands Identifiers:${NC} ${BOLD}${YELLOW}$CMD_IDENTIFIER${NC}"
+echo -e "${CYAN}📁 Logs saved to:${NC} ${BOLD}${YELLOW}$LOG_FILE${NC}"
+echo -e "${CYAN}📄 Filter file (use this path):${NC} ${BOLD}${YELLOW}$FILTER_FILE${NC}"
+echo -e "${CYAN}❓ Need Help:${NC} ${YELLOW}android_logcat $CMD_IDENTIFIER --help${NC}"
 echo ""
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
