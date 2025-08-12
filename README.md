@@ -111,6 +111,7 @@ adb devices
 ```
 
 ### Filter Logs (Real-time)
+Open a new terminal and run:
 ```bash
 android_logcat <session_id> --filter '<search_term>'
 ```
@@ -123,6 +124,7 @@ android_logcat 12345 --filter 'MainActivity'
 ```
 
 ### Search Saved Logs
+Open a new terminal and run:
 ```bash
 android_logcat <session_id> --search '<search_term>'
 ```
@@ -135,11 +137,13 @@ android_logcat 12345 --search 'retrofit'
 ```
 
 ### Clear Filter
+Open a new terminal and run:
 ```bash
 android_logcat <session_id> --filter clear
 ```
 
 ### Help
+Open a new terminal and run:
 ```bash
 android_logcat --help
 ```
