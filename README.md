@@ -136,7 +136,7 @@ android_logcat 12345 --search 'retrofit'
 
 ### Clear Filter
 ```bash
-android_logcat <session_id> --clear
+android_logcat <session_id> --filter clear
 ```
 
 ### Help
